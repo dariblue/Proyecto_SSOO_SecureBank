@@ -18,7 +18,7 @@ static InfoHijo g_hijos[MAX_HIJOS];
 static int g_num_hijos = 0;
 
 static Config g_cfg;
-static volatile sig_atomic_t g_salir = 0;
+static volatile sig_atomic_t g_salir = 0; /* <- volatile: Evita que el compilador optimice la variable. sig_atomic_t: Garantiza modificacion segura por senales OS */
 
 /* Señales */
 static void manejador_sigterm(int s) {
@@ -334,9 +334,9 @@ int main(void) {
     return 1;
   }
 
-  sem_unlink(SEM_CUENTAS);
+  sem_unlink(SEM_CUENTAS); /* <- Unlink desregistra el semaforo del kernel (/dev/shm). Vital porque sino quedarian vivos infinitamente */
   sem_unlink(SEM_CONFIG);
-  sem_t *sem_c = sem_open(SEM_CUENTAS, O_CREAT | O_EXCL, 0600, 1);
+  sem_t *sem_c = sem_open(SEM_CUENTAS, O_CREAT | O_EXCL, 0600, 1); /* <- O_CREAT: Crear. O_EXCL: Falla si ya existe. 0600: Permisos CHMOD. 1: Valor (Semaforo Binario / Mutex) */
   sem_t *sem_g = sem_open(SEM_CONFIG, O_CREAT | O_EXCL, 0600, 1);
   if (sem_c == SEM_FAILED || sem_g == SEM_FAILED) {
     perror("sem_open inicial");
@@ -352,11 +352,11 @@ int main(void) {
   /* Crear las tres colas POSIX en modo no bloqueante para poder
    * drenarlas con mq_receive en un bucle sin quedarse colgado    */
   struct mq_attr attr;
-  memset(&attr, 0, sizeof(attr));
+  memset(&attr, 0, sizeof(attr)); /* <- Limpia toda la basura de RAM de la estructura asignandola a Ceros absolutos */
   attr.mq_maxmsg = MQ_MAXMSG;
-  attr.mq_flags = O_NONBLOCK;
+  attr.mq_flags = O_NONBLOCK; /* <- Mails: Flag critico. Impide que las colas bloqueen el proceso entero esperandolas. */
 
-  mq_unlink(MQ_MONITOR);
+  mq_unlink(MQ_MONITOR); /* <- Lo mismo que los semaforos pero limpiando buzones MQ en /dev/mqueue */
   mq_unlink(MQ_LOG);
   mq_unlink(MQ_ALERTA);
 
@@ -470,7 +470,7 @@ int main(void) {
         procesar_alertas();
 
       int wst;
-      if (waitpid(pid, &wst, WNOHANG) == pid) {
+      if (waitpid(pid, &wst, WNOHANG) == pid) { /* <- WNOHANG: No se congela. El padre tira la caña sin esperar. Retorna pid si acabo */
         if (pipe_wr != -1) {
           close(pipe_wr);
           pipe_wr = -1;
@@ -500,12 +500,12 @@ int main(void) {
   }
 
   mq_close(g_mq_monitor);
-  mq_unlink(MQ_MONITOR);
+  mq_unlink(MQ_MONITOR); /* <- Lo mismo que los semaforos pero limpiando buzones MQ en /dev/mqueue */
   mq_close(g_mq_log);
   mq_unlink(MQ_LOG);
   mq_close(g_mq_alerta);
   mq_unlink(MQ_ALERTA);
-  sem_unlink(SEM_CUENTAS);
+  sem_unlink(SEM_CUENTAS); /* <- Unlink desregistra el semaforo del kernel (/dev/shm). Vital porque sino quedarian vivos infinitamente */
   sem_unlink(SEM_CONFIG);
   return 0;
 }

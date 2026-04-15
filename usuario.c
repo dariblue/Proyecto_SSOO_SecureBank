@@ -88,7 +88,7 @@ E2C940E3C540D7C9C4C5D540D8E4C540C3D6D5E2C5D9E5C5E240C5D340C5E2D8E4C5D3C5E3D640C4
  *      de leer desde el principio hasta encontrarla. Asi garantiza O(1).
  * ------------------------------------------------------------------------- */
 static int leer_cuenta(int id, Cuenta *c) {
-    if (id < ID_INICIAL) return -1; /* Seguridad: Evitar offsets negativos si el ID es invalido */
+    if (id < ID_INICIAL) return -1; /* <- Guardia: Previene que pasen un ID trampa que corrompa la formula del fseek */ /* Seguridad: Evitar offsets negativos si el ID es invalido */
     /* Calculo Matematico del Offset en Bytes: 
        ej: cuenta 1002 - 1001 = 1 * tamano_de_cuenta = saltar 1ra posicion */
     long offset = (long)(id - ID_INICIAL) * (long)sizeof(Cuenta); /* El cast a long evita desbordamientos en archivos gigantes */
@@ -126,7 +126,7 @@ static int escribir_cuenta(const Cuenta *c) {
     long offset = (long)(c->numero_cuenta - ID_INICIAL) * (long)sizeof(Cuenta);
 
     /* MODO rb+: Lectura/Escritura sin borrar lo que habia antes */
-    FILE *f = fopen(g_cfg.archivo_cuentas, "rb+");
+    FILE *f = fopen(g_cfg.archivo_cuentas, "rb+"); /* <- rb+: Read Binary Plus. Permite Escritura aleatoria (fseek) sin vaciar archivo */
     if (!f) return -1;
 
     /* Salto y sobreescritura */

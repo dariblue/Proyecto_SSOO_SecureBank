@@ -99,7 +99,7 @@ static void analizar(const DatosMonitor *dm) {
         int idx = -1;
         for (int i = 0; i < g_n_retiros; i++)
             if (g_retiros[i].cuenta_id == dm->cuenta_origen) { idx = i; break; }
-        if (idx < 0 && g_n_retiros < MAX_CUENTAS_TRACK) {
+        if (idx < 0 && g_n_retiros < MAX_CUENTAS_TRACK) { /* <- Lógica en caché. Si el cliente no esta siendo trackeado y nos cabe en RAM, lo grabamos */
             idx = g_n_retiros++;
             g_retiros[idx].cuenta_id = dm->cuenta_origen;
             g_retiros[idx].retiros_consecutivos = 0;
@@ -156,7 +156,7 @@ static void analizar(const DatosMonitor *dm) {
 int main(void) {
     signal(SIGTERM, manejador_sigterm);
     /* Ignoramos SIGINT (Ctrl+C) para que solo el PADRE pueda matarnos educadamente */
-    signal(SIGINT,  SIG_IGN);
+    signal(SIGINT,  SIG_IGN); /* <- SIG_IGN (Ignore): El vigilante es invulnerable al CTRL+C. Solo el Banco puede matarlo. */
 
     leer_config_monitor();
 
