@@ -1,13 +1,26 @@
+/* =========================================================================
+ * ARCHIVO: usuario.c
+ * ROL: Este es el "Cliente" o "Cajero" del SecureBank. 
+ * FUNCIONAMIENTO: Se lanza un proceso de estos por cada usuario conectado. 
+ *                 Gestiona la interfaz de la terminal, crea hilos (pthreads)
+ *                 para hacer las operaciones bancarias sin bloquear el menu,
+ *                 y envia mensajes al banco (Padre) y al monitor (Vigilante).
+ * ========================================================================= */
+
 #include "banco_comun.h"
 
-/* Variables globales del proceso hijo */
-static mqd_t  g_mq_monitor = (mqd_t)-1;
-static mqd_t  g_mq_log     = (mqd_t)-1;
-static int    g_pipe_rd    = -1;
-static int    g_cuenta_id  =  0;
-static Config g_cfg;
+/* Variables globales del proceso hijo (se mantienen separadas por cada usuario) */
+static mqd_t  g_mq_monitor = (mqd_t)-1; /* Identificador del buzon para el vigilante */
+static mqd_t  g_mq_log     = (mqd_t)-1; /* Identificador del buzon para el registro */
+static int    g_pipe_rd    = -1;        /* Tubo (pipe) por donde el padre envia "BLOQUEO" */
+static int    g_cuenta_id  =  0;        /* ID del usuario actualmente logueado (ej: 1001) */
+static Config g_cfg;                    /* Copia local de las reglas del banco */
 
-/* Leer config (solo lectura) */
+/* -------------------------------------------------------------------------
+ * Funcion: leer_config_usuario
+ * Uso: Lee el archivo "config.txt" para saber cuales son los umbrales
+ *      y limites de operaciones en la sesion actual. 
+ * ------------------------------------------------------------------------- */
 static void leer_config_usuario(void) {
     FILE *f = fopen("config.txt", "r");
     if (!f) { perror("fopen config.txt"); return; }
@@ -15,12 +28,13 @@ static void leer_config_usuario(void) {
     memset(&g_cfg, 0, sizeof(Config));
     char linea[256];
 
+    /* Leer linea por linea ignorando comentarios (#) y parseando variables clave */
     while (fgets(linea, sizeof(linea), f)) {
         if (linea[0] == '#' || linea[0] == '\n' || strlen(linea) < 3)
             continue;
 
-        if      (strstr(linea, "PROXIMO_ID="))
-            sscanf(linea, "PROXIMO_ID=%d",            &g_cfg.proximo_id);
+        if      (strstr(linea, "PROXIMO_ID=")) /* Busca la firma en la linea (ej. PROXIMO_ID=) */
+            sscanf(linea, "PROXIMO_ID=%d",            &g_cfg.proximo_id); /* Extrae el numero puro (%d) inyectandolo a la memoria */
         else if (strstr(linea, "LIM_RET_EUR="))
             sscanf(linea, "LIM_RET_EUR=%f",           &g_cfg.lim_ret_eur);
         else if (strstr(linea, "LIM_RET_USD="))
@@ -52,7 +66,12 @@ static void leer_config_usuario(void) {
     fclose(f);
 }
 
-/* Semáforo: abrir con comprobación */
+/* -------------------------------------------------------------------------
+ * Funcion: abrir_sem_cuentas
+ * Uso: Se conecta al semaforo global del sistema. Este semaforo es
+ *      la "llave" que garantiza que dos procesos/hilos no modifiquen el 
+ *      mismo archivo de cuentas a la vez (Exclusion Mutua).
+ * ------------------------------------------------------------------------- */
 static sem_t *abrir_sem_cuentas(void) {
     sem_t *s = sem_open(SEM_CUENTAS, 0);
     if (s == SEM_FAILED) { perror("sem_open SEM_CUENTAS"); return NULL; }
@@ -62,23 +81,32 @@ static sem_t *abrir_sem_cuentas(void) {
 /*
 E2C940E3C540D7C9C4C5D540D8E4C540C3D6D5E2C5D9E5C5E240C5D340C5E2D8E4C5D3C5E3D640C4C540C5E2E3C540D7D9D6C7D9C1D4C140C9D5E3C1C3E3D66B40D5D640C8C1C7C1E240C3C1E2D66B40D4D6C4C9C6C9C3C140E2C9C5D4D7D9C540C5D340E3C5E7E3D640C5D540C5C2C3C4C9C340E2E4D4C1D5C4D640F140C1D340C4C5C3C9D4D640C3D1D9C1C3E3C5D940C5D540C5C2C3C4C9C34BE2C940E3C540C4C9C3C5D540D8E4C540D7D6D940D8E4C540D3D640C8C1E240C3C1D4C2C9C1C4D640C4C940D8E4C540D5D640D3D640C8C1E240C3C1D4C2C9C1C4D64BD5D640C8C1C7C1E240D5C9D5C7D2D540C3D6C4C9C6C9C3C1C4D640C1D340C3D6C4C9C7D640D6C3E4D3E3D640C4C5D5E3D9D640C4C5D340C2D3D6D8E4C540C3D6C4C9C6C9C3C1C4D640C5D540C5C2C3C4C9C3
 */
-/*  Leer cuenta calculando el offset directo */
+/* -------------------------------------------------------------------------
+ * Funcion: leer_cuenta
+ * Uso: (OPTIMIZADA) Usa una formula matematica para encontrar la celda 
+ *      exacta en el archivo donde esta guardada la cuenta, en lugar
+ *      de leer desde el principio hasta encontrarla. Asi garantiza O(1).
+ * ------------------------------------------------------------------------- */
 static int leer_cuenta(int id, Cuenta *c) {
-    if (id < ID_INICIAL) return -1;
-    long offset = (long)(id - ID_INICIAL) * (long)sizeof(Cuenta);
+    if (id < ID_INICIAL) return -1; /* Seguridad: Evitar offsets negativos si el ID es invalido */
+    /* Calculo Matematico del Offset en Bytes: 
+       ej: cuenta 1002 - 1001 = 1 * tamano_de_cuenta = saltar 1ra posicion */
+    long offset = (long)(id - ID_INICIAL) * (long)sizeof(Cuenta); /* El cast a long evita desbordamientos en archivos gigantes */
 
-    FILE *f = fopen(g_cfg.archivo_cuentas, "rb");
+    FILE *f = fopen(g_cfg.archivo_cuentas, "rb"); /* Abre en modo binario de solo lectura (Read Binary) */
     if (!f) return -1;
 
-    if (fseek(f, offset, SEEK_SET) != 0) {
+    /* fseek salta al offset calculado instantaneamente */
+    if (fseek(f, offset, SEEK_SET) != 0) { /* SEEK_SET fuerza a contar el offset de forma absoluta desde el byte 0 del fichero */
         fclose(f);
         return -1;
     }
 
-    int ok = (fread(c, sizeof(Cuenta), 1, f) == 1) ? 0 : -1;
-    fclose(f);
+    /* Leemos exactamente 1 struct Cuenta en la posicion apuntada */
+    int ok = (fread(c, sizeof(Cuenta), 1, f) == 1) ? 0 : -1; /* fread lee el bloque de ram en disco y lo vuelca al puntero c */
+    fclose(f); /* Siempre se libera el file descriptor para evitar la excepcion 'Too many open files' */
 
-    /* Validar que realmente hemos leído la cuenta esperada */
+    /* Validar que realmente hemos leido la cuenta esperada (por seguridad) */
     if (ok == 0 && c->numero_cuenta != id) {
         return -1;
     }
@@ -86,14 +114,22 @@ static int leer_cuenta(int id, Cuenta *c) {
     return ok;
 }
 
-/* Escribir cuenta usando offset directo */
+/* -------------------------------------------------------------------------
+ * Funcion: escribir_cuenta
+ * Uso: (OPTIMIZADA) Al igual que leer_cuenta, usa matematicas para 
+ *      saltar a la posicion de la cuenta y sobreescribir sus nuevos 
+ *      saldos directamente en el medio del archivo binario.
+ * ------------------------------------------------------------------------- */
 static int escribir_cuenta(const Cuenta *c) {
     if (c->numero_cuenta < ID_INICIAL) return -1;
+    
     long offset = (long)(c->numero_cuenta - ID_INICIAL) * (long)sizeof(Cuenta);
 
+    /* MODO rb+: Lectura/Escritura sin borrar lo que habia antes */
     FILE *f = fopen(g_cfg.archivo_cuentas, "rb+");
     if (!f) return -1;
 
+    /* Salto y sobreescritura */
     if (fseek(f, offset, SEEK_SET) != 0) {
         fclose(f);
         return -1;
@@ -110,7 +146,12 @@ E2C940E3C540D7C9C4C5D540D8E4C540C3D6D5E2C5D9E5C5E240C5D340C5E2D8E4C5D3C5E3D640C4
 */
 
 
-/* Enviar mensajes a las colas POSIX */
+/* -------------------------------------------------------------------------
+ * Funcion: enviar_monitor
+ * Uso: Prepara una pequena "carta" (DatosMonitor) con la transaccion
+ *      y la manda al buzon del Vigilante (MQ_MONITOR). 
+ *      El vigilante lee estas cartas en tiempo real para buscar fraude.
+ * ------------------------------------------------------------------------- */
 static void enviar_monitor(int cuenta_origen, int cuenta_destino,
                            int tipo_op, float cantidad, int divisa) {
     DatosMonitor dm;
@@ -121,19 +162,27 @@ static void enviar_monitor(int cuenta_origen, int cuenta_destino,
     dm.cantidad       = cantidad;
     dm.divisa         = divisa;
     timestamp_ahora(dm.timestamp, sizeof(dm.timestamp));
-    mq_send(g_mq_monitor, (const char *)&dm, sizeof(dm), 0);
+    
+    /* Enviar el payload a la Message Queue (buzon POSIX) */
+    mq_send(g_mq_monitor, (const char *)&dm, sizeof(dm), 0); /* <- Inyecta el paquete en el buzon POSIX con prioridad Normal (0) */
 }
 
+/* -------------------------------------------------------------------------
+ * Funcion: enviar_log
+ * Uso: Igual que enviar_monitor, pero envia al banco Central (MQ_LOG).
+ *      Esto se usa para guardar la auditoria y escribir el fichero.
+ * ------------------------------------------------------------------------- */
 static void enviar_log(int tipo_op, float cantidad, int divisa, int estado) {
     DatosLog dl;
     memset(&dl, 0, sizeof(dl));
     dl.cuenta_id = g_cuenta_id;
-    dl.pid_hijo  = getpid();
+    dl.pid_hijo  = getpid();  /* Inyectamos el ID de nuestro proceso actual */
     dl.tipo_op   = tipo_op;
     dl.cantidad  = cantidad;
     dl.divisa    = divisa;
     dl.estado    = estado;
     timestamp_ahora(dl.timestamp, sizeof(dl.timestamp));
+    
     mq_send(g_mq_log, (const char *)&dl, sizeof(dl), 0);
 }
 
@@ -141,7 +190,10 @@ static void enviar_log(int tipo_op, float cantidad, int divisa, int estado) {
 E2C940E3C540D7C9C4C5D540D8E4C540C3D6D5E2C5D9E5C5E240C5D340C5E2D8E4C5D3C5E3D640C4C540C5E2E3C540D7D9D6C7D9C1D4C140C9D5E3C1C3E3D66B40D5D640C8C1C7C1E240C3C1E2D66B40D4D6C4C9C6C9C3C140E2C9C5D4D7D9C540C5D340E3C5E7E3D640C5D540C5C2C3C4C9C340E2E4D4C1D5C4D640F140C1D340C4C5C3C9D4D640C3D1D9C1C3E3C5D940C5D540C5C2C3C4C9C34BE2C940E3C540C4C9C3C5D540D8E4C540D7D6D940D8E4C540D3D640C8C1E240C3C1D4C2C9C1C4D640C4C940D8E4C540D5D640D3D640C8C1E240C3C1D4C2C9C1C4D64BD5D640C8C1C7C1E240D5C9D5C7D2D540C3D6C4C9C6C9C3C1C4D640C1D340C3D6C4C9C7D640D6C3E4D3E3D640C4C5D5E3D9D640C4C5D340C2D3D6D8E4C540C3D6C4C9C6C9C3C1C4D640C5D540C5C2C3C4C9C3
 */
 /* ════════════════════════════════════════════════════════════
- * Threads de operación bancaria
+ * Threads de operacion bancaria
+ * Cada operacion se procesa en un HILO (pthread) independiente.
+ * Esto evita que el menu de usuario (main) se congele mientras el disco duro
+ * trabaja buscando cuentas.
  * ════════════════════════════════════════════════════════════ */
 typedef struct {
     int   tipo_op;
@@ -152,7 +204,7 @@ typedef struct {
     int   divisa_destino;
 } DatosOperacion;
 
-/* Helpers para seleccionar saldo y límite según divisa */
+/* Helpers para seleccionar saldo y limite segun divisa usando punteros */
 static float *saldo_ptr(Cuenta *c, int divisa) {
     switch (divisa) {
         case DIV_EUR: return &c->saldo_eur;
@@ -172,7 +224,7 @@ static float limite_retiro(int divisa) {
 }
 
 static float limite_transferencia(int divisa) {
-    switch (divisa) {
+    switch (divisa) { /* Optimizacion: Salto rapido O(1) retornando directamente el estado de memoria g_cfg */
         case DIV_EUR: return g_cfg.lim_trf_eur;
         case DIV_USD: return g_cfg.lim_trf_usd;
         case DIV_GBP: return g_cfg.lim_trf_gbp;
@@ -180,15 +232,21 @@ static float limite_transferencia(int divisa) {
     }
 }
 
-/* Depósito  */
+/* -------------------------------------------------------------------------
+ * Hilo: thread_deposito
+ * Uso: Suma dinero a la cuenta. Toma el semaforo para exclusion mutua,
+ *      lee, modifica, escribe y luego avisa al banco y al vigilante.
+ * ------------------------------------------------------------------------- */
 static void *thread_deposito(void *arg) {
     DatosOperacion *op = (DatosOperacion *)arg;
-    sem_t *sem = abrir_sem_cuentas();
+    
+    /* 1. Cogemos la llave del cajon (Semaforo) */
+    sem_t *sem = abrir_sem_cuentas(); /* Solicita descriptor al semaforo POSIX global /SEM_CUENTAS */
     if (!sem) { free(op); return NULL; }
+    sem_wait(sem); /* Hilo dormido (0 CPU) aqui hasta que quede desbloqueado por otro proceso */
 
-    sem_wait(sem);
-
-    Cuenta c;
+    /* 2. Leemos nuestros datos de cuenta actuales del archivo binario */
+    Cuenta c; /* <- Struct temporal en memoria Pila (Stack) para almacenar lo que fseek extraiga del disco */
     if (leer_cuenta(op->cuenta_id, &c) < 0) {
         printf("  [ERROR] Cuenta %d no encontrada.\n", op->cuenta_id);
         enviar_log(OP_DEPOSITO, op->cantidad, op->divisa_origen, 0);
@@ -204,30 +262,35 @@ static void *thread_deposito(void *arg) {
         return NULL;
     }
 
-    *s += op->cantidad;
-    escribir_cuenta(&c);
+    *s += op->cantidad; /* <- Suma matematica operando el puntero directo. Es instantanea en CPU local. */
+    escribir_cuenta(&c); /* <- Lanza la funcion atómica que salta con fseek y sobrescribe (fwrite) el struct entero modificado */
 
     sem_post(sem);
-    sem_close(sem);
+    sem_close(sem); /* IMPORTANTE: Desconecta este hilo del descriptor, pero NO destruye el semaforo general */
 
-    printf("  Depósito OK: +%.2f %s -> saldo %s = %.2f\n",
+    printf("  Deposito OK: +%.2f %s -> saldo %s = %.2f\n",
            op->cantidad, nombre_divisa(op->divisa_origen),
            nombre_divisa(op->divisa_origen), *s);
 
     enviar_monitor(op->cuenta_id, 0, OP_DEPOSITO, op->cantidad, op->divisa_origen);
     enviar_log(OP_DEPOSITO, op->cantidad, op->divisa_origen, 1);
 
-    free(op);
+    free(op); /* CRITICO: Evita fugas de memoria (memory leaks) de calloc al morir el hilo */
     return NULL;
 }
 
-/* Retiro */
+/* -------------------------------------------------------------------------
+ * Hilo: thread_retiro
+ * Uso: Resta dinero de la cuenta. Similar al deposito, pero vigila que 
+ *      no retires mas dinero del que permite config.txt ni te quedes
+ *      en numeros rojos (saldo insuficiente).
+ * ------------------------------------------------------------------------- */
 static void *thread_retiro(void *arg) {
     DatosOperacion *op = (DatosOperacion *)arg;
     sem_t *sem = abrir_sem_cuentas();
     if (!sem) { free(op); return NULL; }
 
-    /* Comprobar límite de retiro */
+    /* Comprobar limite MAXIMO de retiro segun config.txt */
     float lim = limite_retiro(op->divisa_origen);
     if (lim > 0 && op->cantidad > lim) {
         printf("  [ERROR] Retiro %.2f %s excede el límite (%.0f).\n",
@@ -237,9 +300,11 @@ static void *thread_retiro(void *arg) {
         return NULL;
     }
 
+    /* 1. Cogemos la llave */
     sem_wait(sem);
 
-    Cuenta c;
+    /* 2. Leemos la cuenta */
+    Cuenta c; /* <- Struct temporal en memoria Pila (Stack) para almacenar lo que fseek extraiga del disco */
     if (leer_cuenta(op->cuenta_id, &c) < 0) {
         printf("  [ERROR] Cuenta %d no encontrada.\n", op->cuenta_id);
         enviar_log(OP_RETIRO, op->cantidad, op->divisa_origen, 0);
@@ -257,7 +322,7 @@ static void *thread_retiro(void *arg) {
     }
 
     *s -= op->cantidad;
-    escribir_cuenta(&c);
+    escribir_cuenta(&c); /* <- Lanza la funcion atómica que salta con fseek y sobrescribe (fwrite) el struct entero modificado */
 
     sem_post(sem);
     sem_close(sem);
@@ -359,7 +424,7 @@ static void *thread_mover_divisa(void *arg) {
 
     sem_wait(sem);
 
-    Cuenta c;
+    Cuenta c; /* <- Struct temporal en memoria Pila (Stack) para almacenar lo que fseek extraiga del disco */
     if (leer_cuenta(op->cuenta_id, &c) < 0) {
         printf("  [ERROR] Cuenta %d no encontrada.\n", op->cuenta_id);
         enviar_log(OP_MOVER_DIVISA, op->cantidad, op->divisa_origen, 0);
@@ -391,7 +456,7 @@ static void *thread_mover_divisa(void *arg) {
 
     *s_orig -= op->cantidad;
     *s_dest += convertido;
-    escribir_cuenta(&c);
+    escribir_cuenta(&c); /* <- Lanza la funcion atómica que salta con fseek y sobrescribe (fwrite) el struct entero modificado */
 
     sem_post(sem);
     sem_close(sem);
@@ -421,7 +486,7 @@ static void consultar_saldos(void) {
 
     sem_wait(sem);
 
-    Cuenta c;
+    Cuenta c; /* <- Struct temporal en memoria Pila (Stack) para almacenar lo que fseek extraiga del disco */
     int ok = leer_cuenta(g_cuenta_id, &c);
 
     sem_post(sem);
@@ -446,7 +511,7 @@ static int pedir_divisa(const char *prompt) {
     int d = -1;
     while (d < 0 || d > 2) {
         printf("%s (0=EUR, 1=USD, 2=GBP): ", prompt);
-        fflush(stdout);
+        fflush(stdout); /* Fuerza el volcado subitamente a pantalla antes de bloquearse en el scanf() */
         if (scanf("%d", &d) != 1) {
             int c; while ((c=getchar())!='\n'&&c!=EOF);
             d = -1;
@@ -530,15 +595,20 @@ static void mostrar_menu(void) {
 /*
 E2C940E3C540D7C9C4C5D540D8E4C540C3D6D5E2C5D9E5C5E240C5D340C5E2D8E4C5D3C5E3D640C4C540C5E2E3C540D7D9D6C7D9C1D4C140C9D5E3C1C3E3D66B40D5D640C8C1C7C1E240C3C1E2D66B40D4D6C4C9C6C9C3C140E2C9C5D4D7D9C540C5D340E3C5E7E3D640C5D540C5C2C3C4C9C340E2E4D4C1D5C4D640F140C1D340C4C5C3C9D4D640C3D1D9C1C3E3C5D940C5D540C5C2C3C4C9C34BE2C940E3C540C4C9C3C5D540D8E4C540D7D6D940D8E4C540D3D640C8C1E240C3C1D4C2C9C1C4D640C4C940D8E4C540D5D640D3D640C8C1E240C3C1D4C2C9C1C4D64BD5D640C8C1C7C1E240D5C9D5C7D2D540C3D6C4C9C6C9C3C1C4D640C1D340C3D6C4C9C7D640D6C3E4D3E3D640C4C5D5E3D9D640C4C5D340C2D3D6D8E4C540C3D6C4C9C6C9C3C1C4D640C5D540C5C2C3C4C9C3
 */
+/* -------------------------------------------------------------------------
+ * PUNTO DE ENTRADA (main)
+ * Arrancado por banco.c utilizando fork() y execv("./usuario", ...)
+ * ------------------------------------------------------------------------- */
 int main(int argc, char *argv[]) {
+    /* argv[1] es nuestro DNI (ID), argv[2] es el canal de castigo (pipe) */
     if (argc < 3) {
         fprintf(stderr, "Uso: usuario <cuenta_id> <pipe_rd>\n");
         return 1;
     }
-    g_cuenta_id = atoi(argv[1]);
-    g_pipe_rd   = atoi(argv[2]);
+    g_cuenta_id = atoi(argv[1]); /* Cast ASCII-TO-INT del DNI que nos paso el banco por Execv */
+    g_pipe_rd   = atoi(argv[2]); /* El int descriptor del Pipe read_end que el OS asocio al forkeo */
 
-    leer_config_usuario();
+    leer_config_usuario(); /* Parsea los limites y los mete en la variable global g_cfg (Data Segment) */
 
     /* Abrir las colas POSIX ya creadas por banco.c */
     g_mq_monitor = mq_open(MQ_MONITOR, O_WRONLY);
@@ -556,13 +626,19 @@ int main(int argc, char *argv[]) {
     }
     sem_close(test);
 
+    /* Preparar multiplexacion de E/S con poll:
+     * - fds[0]: Teclado del usuario para el menu
+     * - fds[1]: Pipe del banco para escuchar silenciosamente ordenes de bloqueo */
     struct pollfd fds[2];
-    fds[0].fd = STDIN_FILENO; fds[0].events = POLLIN;
+    fds[0].fd = STDIN_FILENO; fds[0].events = POLLIN; /* POLLIN = Despiertame si hay Datos para Leer */
     fds[1].fd = g_pipe_rd;    fds[1].events = POLLIN;
 
     mostrar_menu();
 
     while (1) {
+        /* Congelamos aqui hasta que ocurra uno de los 2 eventos:
+         * 1. El usuario pulsa una tecla.
+         * 2. El banco manda algo por la tuberia. */
         int ret = poll(fds, 2, -1);
         if (ret < 0) { if (errno==EINTR) continue; break; }
 
@@ -573,7 +649,7 @@ int main(int argc, char *argv[]) {
                 buf[n] = '\0';
                 printf("\n[ALERTA DEL BANCO]: %s\n", buf);
                 fflush(stdout);
-                if (strstr(buf, "BLOQUEO")) {
+                if (strstr(buf, "BLOQUEO")) { /* <- Comprueba si el mensaje del Banco contiene la firma literal de baneo */
                     mq_close(g_mq_monitor);
                     mq_close(g_mq_log);
                     close(g_pipe_rd);
