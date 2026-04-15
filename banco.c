@@ -107,14 +107,25 @@ static void guardar_proximo_id(int nuevo_id) {
 /* Forward declaration */
 static void escribir_log(const char *linea);
 
-/* Buscar cuenta */
+/* Buscar cuenta usando fseek (Acceso Directo) */
 static int buscar_cuenta(int numero, Cuenta *c) {
+    if (numero < ID_INICIAL) return 0;
+    long offset = (long)(numero - ID_INICIAL) * (long)sizeof(Cuenta);
+
     FILE *f = fopen(g_cfg.archivo_cuentas, "rb");
     if (!f) return 0;
-    int ok = 0;
-    while (fread(c, sizeof(Cuenta), 1, f) == 1)
-        if (c->numero_cuenta == numero) { ok = 1; break; }
+
+    if (fseek(f, offset, SEEK_SET) != 0) {
+        fclose(f);
+        return 0;
+    }
+
+    int ok = (fread(c, sizeof(Cuenta), 1, f) == 1) ? 1 : 0;
     fclose(f);
+
+    /* Validar que el registro contiene el ID correcto */
+    if (ok && c->numero_cuenta != numero) return 0;
+
     return ok;
 }
 
@@ -131,13 +142,21 @@ static int crear_cuenta(Cuenta *nueva) {
     sem_post(sc);
     sem_close(sc);
 
-    /* 2. Escribir la nueva cuenta en cuentas.dat bajo SEM_CUENTAS */
+    /* 2. Escribir la nueva cuenta en el offset exacto según su ID */
     sem_t *sa = sem_open(SEM_CUENTAS, 0);
     if (sa == SEM_FAILED) { perror("sem_open SEM_CUENTAS"); return -1; }
 
     sem_wait(sa);
-    FILE *f = fopen(g_cfg.archivo_cuentas, "ab");
+    /* Usar "rb+" para permitir fseek y escritura en posición media/final sin truncar */
+    FILE *f = fopen(g_cfg.archivo_cuentas, "rb+");
+    if (!f) {
+        /* Si no existe, lo creamos de cero */
+        f = fopen(g_cfg.archivo_cuentas, "wb+");
+    }
+
     if (f) {
+        long offset = (long)(nueva->numero_cuenta - ID_INICIAL) * (long)sizeof(Cuenta);
+        fseek(f, offset, SEEK_SET);
         fwrite(nueva, sizeof(Cuenta), 1, f);
         fflush(f);
         fclose(f);
