@@ -15,6 +15,9 @@
 #include <sys/wait.h>
 #include <mqueue.h>
 #include <poll.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 /* Constantes  */
 #define ID_INICIAL      1001
@@ -28,6 +31,7 @@
 #define OP_RETIRO        2
 #define OP_TRANSFERENCIA 3
 #define OP_MOVER_DIVISA  4
+#define OP_LOGIN         5
 
 /* Divisas */
 #define DIV_EUR 0
@@ -88,6 +92,7 @@ typedef struct {
 /* Configuración global */
 typedef struct {
     int   proximo_id;
+    int   puerto;
     float lim_ret_eur, lim_ret_usd, lim_ret_gbp;
     float lim_trf_eur, lim_trf_usd, lim_trf_gbp;
     int   umbral_retiros;

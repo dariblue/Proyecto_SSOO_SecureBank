@@ -1,9 +1,5 @@
-[2026-04-15 18:30:29] NUEVA CUENTA: id=1007 titular=Dario
-[2026-04-15 18:30:35] DEPOSITO cuenta=1007 monto=1000.00 divisa=EUR estado=OK pid=45
-[2026-04-15 18:31:00] TRANSFERENCIA cuenta=1007 monto=50.00 divisa=EUR estado=FALLO pid=47
-[2026-04-15 18:31:11] TRANSFERENCIA cuenta=1007 monto=2000.00 divisa=EUR estado=FALLO pid=47
-[2026-04-15 18:31:20] TRANSFERENCIA cuenta=1007 monto=50.00 divisa=EUR estado=OK pid=47
-[2026-04-15 18:33:06] RETIRO cuenta=1007 monto=10.00 divisa=EUR estado=OK pid=47
-[2026-04-15 18:33:12] RETIRO cuenta=1007 monto=10.00 divisa=EUR estado=OK pid=47
-[2026-04-15 18:33:16] RETIRO cuenta=1007 monto=10.00 divisa=EUR estado=OK pid=47
-[2026-04-15 18:33:16] ALERTA: RETIROS_EXCESIVOS - cuenta BLOQUEADA
+[2026-04-28 18:49:12] DEPOSITO cuenta=1001 monto=5000.00 divisa=EUR estado=OK pid=70
+[2026-04-28 18:49:13] RETIRO cuenta=1001 monto=100.00 divisa=EUR estado=OK pid=70
+[2026-04-28 18:49:14] RETIRO cuenta=1001 monto=100.00 divisa=EUR estado=OK pid=70
+[2026-04-28 18:49:15] RETIRO cuenta=1001 monto=100.00 divisa=EUR estado=OK pid=70
+[2026-04-28 18:49:15] ALERTA: RETIROS_EXCESIVOS - cuenta BLOQUEADA

@@ -17,6 +17,19 @@ static int    g_cuenta_id  =  0;        /* ID del usuario actualmente logueado (
 static Config g_cfg;                    /* Copia local de las reglas del banco */
 
 /* -------------------------------------------------------------------------
+ * Funcion: limpiar_telnet
+ * Uso: Telnet envia "\r\n" al pulsar Enter, lo cual rompe scanf/fgets.
+ *      Esta funcion elimina los caracteres \r y \n sobrantes de un buffer.
+ * ------------------------------------------------------------------------- */
+static void limpiar_telnet(char *buf) {
+    char *p = buf;
+    while (*p) {
+        if (*p == '\r' || *p == '\n') { *p = '\0'; break; }
+        p++;
+    }
+}
+
+/* -------------------------------------------------------------------------
  * Funcion: leer_config_usuario
  * Uso: Lee el archivo "config.txt" para saber cuales son los umbrales
  *      y limites de operaciones en la sesion actual. 
@@ -64,6 +77,158 @@ static void leer_config_usuario(void) {
     }
 
     fclose(f);
+}
+
+/* Forward declarations (Fase II: necesarias porque autenticar_usuario y
+ * crear_cuenta_remota se definen antes que leer_cuenta/escribir_cuenta) */
+static int leer_cuenta(int id, Cuenta *c);
+static int escribir_cuenta(const Cuenta *c);
+
+/* -------------------------------------------------------------------------
+ * Funcion: guardar_proximo_id_usuario
+ * Uso: Replica de la logica de banco.c para actualizar PROXIMO_ID en
+ *      config.txt desde el proceso hijo (necesario para crear cuentas
+ *      remotamente en Fase II).
+ * ------------------------------------------------------------------------- */
+static void guardar_proximo_id_usuario(int nuevo_id) {
+    FILE *f = fopen("config.txt", "r");
+    if (!f) return;
+    char contenido[4096];
+    size_t n = fread(contenido, 1, sizeof(contenido) - 1, f);
+    contenido[n] = '\0';
+    fclose(f);
+
+    char *p = strstr(contenido, "PROXIMO_ID=");
+    if (!p) return;
+    size_t antes = (size_t)(p - contenido);
+    char *fin_linea = strchr(p, '\n');
+
+    char nuevo[4096];
+    snprintf(nuevo, sizeof(nuevo), "%.*sPROXIMO_ID=%d%s",
+             (int)antes, contenido, nuevo_id, fin_linea ? fin_linea : "");
+
+    f = fopen("config.txt", "w");
+    if (!f) return;
+    fputs(nuevo, f);
+    fclose(f);
+}
+
+/* -------------------------------------------------------------------------
+ * Funcion: crear_cuenta_remota
+ * Uso: Fase II — Permite crear una cuenta nueva desde el proceso hijo
+ *      (via Telnet). Replica la sincronizacion exacta de banco.c:
+ *      SEM_CONFIG para el ID y SEM_CUENTAS para la escritura en disco.
+ * ------------------------------------------------------------------------- */
+static int crear_cuenta_remota(const char *titular) {
+    Cuenta nueva;
+    memset(&nueva, 0, sizeof(nueva));
+    strncpy(nueva.titular, titular, MAX_TITULARES - 1);
+    nueva.saldo_eur = nueva.saldo_usd = nueva.saldo_gbp = 0.0f;
+
+    /* 1. Reservar PROXIMO_ID bajo SEM_CONFIG */
+    sem_t *sc = sem_open(SEM_CONFIG, 0);
+    if (sc == SEM_FAILED) { perror("sem_open SEM_CONFIG"); return -1; }
+
+    sem_wait(sc);
+
+    /* Leer PROXIMO_ID actual directamente de config.txt */
+    int proximo_id = -1;
+    FILE *f = fopen("config.txt", "r");
+    if (f) {
+        char linea[256];
+        while (fgets(linea, sizeof(linea), f)) {
+            if (strstr(linea, "PROXIMO_ID=")) {
+                sscanf(linea, "PROXIMO_ID=%d", &proximo_id);
+                break;
+            }
+        }
+        fclose(f);
+    }
+
+    if (proximo_id < ID_INICIAL) {
+        sem_post(sc); sem_close(sc);
+        return -1;
+    }
+
+    nueva.numero_cuenta = proximo_id;
+    guardar_proximo_id_usuario(proximo_id + 1);
+
+    sem_post(sc);
+    sem_close(sc);
+
+    /* 2. Escribir la nueva cuenta bajo SEM_CUENTAS */
+    sem_t *sa = sem_open(SEM_CUENTAS, 0);
+    if (sa == SEM_FAILED) { perror("sem_open SEM_CUENTAS"); return -1; }
+
+    sem_wait(sa);
+    f = fopen(g_cfg.archivo_cuentas, "rb+");
+    if (!f) f = fopen(g_cfg.archivo_cuentas, "wb+");
+    if (f) {
+        long offset = (long)(nueva.numero_cuenta - ID_INICIAL) * (long)sizeof(Cuenta);
+        fseek(f, offset, SEEK_SET);
+        fwrite(&nueva, sizeof(Cuenta), 1, f);
+        fflush(f);
+        fclose(f);
+    }
+    sem_post(sa);
+    sem_close(sa);
+
+    printf("Cuenta %d creada para '%s'\n", nueva.numero_cuenta, nueva.titular);
+    fflush(stdout);
+    return nueva.numero_cuenta;
+}
+
+/* -------------------------------------------------------------------------
+ * Funcion: autenticar_usuario
+ * Uso: Fase II — Pide el numero de cuenta al usuario conectado por Telnet.
+ *      Permite login con cuenta existente o crear cuenta nueva (opcion 0).
+ *      Retorna el cuenta_id validado o -1 si el usuario cierra la conexion.
+ * ------------------------------------------------------------------------- */
+static int autenticar_usuario(void) {
+    char buf[64];
+
+    while (1) {
+        printf("\n+==============================+\n");
+        printf("|    SecureBank  --  Login     |\n");
+        printf("+==============================+\n");
+        printf("Introduzca su numero de cuenta (0=nueva, -1=salir): ");
+        fflush(stdout);
+
+        if (fgets(buf, sizeof(buf), stdin) == NULL) return -1;
+        limpiar_telnet(buf);
+        if (strlen(buf) == 0) continue;
+
+        int numero = atoi(buf);
+        if (numero == -1) return -1;
+
+        if (numero == 0) {
+            printf("Nombre del titular: ");
+            fflush(stdout);
+            if (fgets(buf, sizeof(buf), stdin) == NULL) return -1;
+            limpiar_telnet(buf);
+            if (strlen(buf) == 0) strcpy(buf, "Desconocido");
+
+            int id = crear_cuenta_remota(buf);
+            if (id < 0) {
+                printf("Error al crear cuenta.\n");
+                fflush(stdout);
+                continue;
+            }
+            return id;
+        }
+
+        /* Verificar que la cuenta existe */
+        Cuenta c;
+        if (leer_cuenta(numero, &c) < 0) {
+            printf("Cuenta %d no encontrada. Intente de nuevo.\n", numero);
+            fflush(stdout);
+            continue;
+        }
+
+        printf("Bienvenido, %s (cuenta %d)\n", c.titular, numero);
+        fflush(stdout);
+        return numero;
+    }
 }
 
 /* -------------------------------------------------------------------------
@@ -506,18 +671,18 @@ static void consultar_saldos(void) {
     printf("  └─────────────────────────────┘\n");
 }
 
-/* Pedir divisa */
+/* Pedir divisa (Fase II: usa fgets + limpiar_telnet en vez de scanf) */
 static int pedir_divisa(const char *prompt) {
-    int d = -1;
-    while (d < 0 || d > 2) {
+    char buf[64];
+    int d;
+    while (1) {
         printf("%s (0=EUR, 1=USD, 2=GBP): ", prompt);
-        fflush(stdout); /* Fuerza el volcado subitamente a pantalla antes de bloquearse en el scanf() */
-        if (scanf("%d", &d) != 1) {
-            int c; while ((c=getchar())!='\n'&&c!=EOF);
-            d = -1;
-        }
+        fflush(stdout);
+        if (fgets(buf, sizeof(buf), stdin) == NULL) return DIV_EUR;
+        limpiar_telnet(buf);
+        if (sscanf(buf, "%d", &d) == 1 && d >= 0 && d <= 2)
+            return d;
     }
-    return d;
 }
 
 /* Procesar opción del menú */
@@ -530,7 +695,7 @@ static void procesar_opcion(int opcion) {
         d->cuenta_id     = g_cuenta_id;
         d->divisa_origen = pedir_divisa("Divisa");
         printf("Cantidad a depositar: "); fflush(stdout);
-        scanf("%f", &d->cantidad);
+        { char buf[64]; if(fgets(buf,sizeof(buf),stdin)){limpiar_telnet(buf);sscanf(buf,"%f",&d->cantidad);} }
         lanzar_operacion(thread_deposito, d);
         break;
     case 2:
@@ -539,7 +704,7 @@ static void procesar_opcion(int opcion) {
         d->cuenta_id     = g_cuenta_id;
         d->divisa_origen = pedir_divisa("Divisa");
         printf("Cantidad a retirar: "); fflush(stdout);
-        scanf("%f", &d->cantidad);
+        { char buf[64]; if(fgets(buf,sizeof(buf),stdin)){limpiar_telnet(buf);sscanf(buf,"%f",&d->cantidad);} }
         lanzar_operacion(thread_retiro, d);
         break;
     case 3:
@@ -547,10 +712,10 @@ static void procesar_opcion(int opcion) {
         d->tipo_op       = OP_TRANSFERENCIA;
         d->cuenta_id     = g_cuenta_id;
         printf("Cuenta destino: "); fflush(stdout);
-        scanf("%d", &d->cuenta_destino);
+        { char buf[64]; if(fgets(buf,sizeof(buf),stdin)){limpiar_telnet(buf);sscanf(buf,"%d",&d->cuenta_destino);} }
         d->divisa_origen = pedir_divisa("Divisa");
         printf("Cantidad: "); fflush(stdout);
-        scanf("%f", &d->cantidad);
+        { char buf[64]; if(fgets(buf,sizeof(buf),stdin)){limpiar_telnet(buf);sscanf(buf,"%f",&d->cantidad);} }
         lanzar_operacion(thread_transferencia, d);
         break;
     case 4:
@@ -563,7 +728,7 @@ static void procesar_opcion(int opcion) {
         d->divisa_origen  = pedir_divisa("Divisa origen");
         d->divisa_destino = pedir_divisa("Divisa destino");
         printf("Cantidad a convertir: "); fflush(stdout);
-        scanf("%f", &d->cantidad);
+        { char buf[64]; if(fgets(buf,sizeof(buf),stdin)){limpiar_telnet(buf);sscanf(buf,"%f",&d->cantidad);} }
         lanzar_operacion(thread_mover_divisa, d);
         break;
     case 6:
@@ -597,18 +762,23 @@ E2C940E3C540D7C9C4C5D540D8E4C540C3D6D5E2C5D9E5C5E240C5D340C5E2D8E4C5D3C5E3D640C4
 */
 /* -------------------------------------------------------------------------
  * PUNTO DE ENTRADA (main)
- * Arrancado por banco.c utilizando fork() y execv("./usuario", ...)
+ * Fase II: Arrancado por banco.c via fork() + dup2() + execv("./usuario")
+ * STDIN y STDOUT ya apuntan al socket TCP del cliente Telnet.
+ * argv[1] = descriptor del pipe de bloqueo (unico argumento).
  * ------------------------------------------------------------------------- */
 int main(int argc, char *argv[]) {
-    /* argv[1] es nuestro DNI (ID), argv[2] es el canal de castigo (pipe) */
-    if (argc < 3) {
-        fprintf(stderr, "Uso: usuario <cuenta_id> <pipe_rd>\n");
+    /* Fase II: solo recibimos pipe_rd; la cuenta se obtiene interactivamente */
+    if (argc < 2) {
+        fprintf(stderr, "Uso: usuario <pipe_rd>\n");
         return 1;
     }
-    g_cuenta_id = atoi(argv[1]); /* Cast ASCII-TO-INT del DNI que nos paso el banco por Execv */
-    g_pipe_rd   = atoi(argv[2]); /* El int descriptor del Pipe read_end que el OS asocio al forkeo */
+    g_pipe_rd = atoi(argv[1]); /* Descriptor del pipe por donde el banco envia BLOQUEO */
 
-    leer_config_usuario(); /* Parsea los limites y los mete en la variable global g_cfg (Data Segment) */
+    /* Desactivar buffering en stdout para que cada printf se envie
+     * inmediatamente por el socket TCP al cliente Telnet */
+    setvbuf(stdout, NULL, _IONBF, 0);
+
+    leer_config_usuario(); /* Parsea los limites y los mete en la variable global g_cfg */
 
     /* Abrir las colas POSIX ya creadas por banco.c */
     g_mq_monitor = mq_open(MQ_MONITOR, O_WRONLY);
@@ -620,25 +790,49 @@ int main(int argc, char *argv[]) {
 
     sem_t *test = sem_open(SEM_CUENTAS, 0);
     if (test == SEM_FAILED) {
-        fprintf(stderr, "[Cuenta %d] ERROR: semaforo %s no disponible: %s\n",
-                g_cuenta_id, SEM_CUENTAS, strerror(errno));
+        fprintf(stderr, "ERROR: semaforo %s no disponible: %s\n",
+                SEM_CUENTAS, strerror(errno));
         return 1;
     }
     sem_close(test);
 
+    /* ═══ Fase II: Autenticacion interactiva por Telnet ═══
+     * El usuario llega "anonimo". Pedimos su cuenta aqui. */
+    g_cuenta_id = autenticar_usuario();
+    if (g_cuenta_id < 0) {
+        printf("Conexion cerrada.\n");
+        fflush(stdout);
+        mq_close(g_mq_monitor);
+        mq_close(g_mq_log);
+        close(g_pipe_rd);
+        return 0;
+    }
+
+    /* ═══ Fase II: Enviar OP_LOGIN al padre ═══
+     * Notifica al banco que PID -> cuenta_id, para que el mecanismo
+     * de bloqueo por pipe funcione correctamente. Sin esto, el padre
+     * tiene cuenta_id=0 y no puede rutear las alertas del Monitor. */
+    {
+        DatosLog dl;
+        memset(&dl, 0, sizeof(dl));
+        dl.cuenta_id = g_cuenta_id;
+        dl.pid_hijo  = getpid();
+        dl.tipo_op   = OP_LOGIN;
+        dl.estado    = 1;
+        timestamp_ahora(dl.timestamp, sizeof(dl.timestamp));
+        mq_send(g_mq_log, (const char *)&dl, sizeof(dl), 0);
+    }
+
     /* Preparar multiplexacion de E/S con poll:
-     * - fds[0]: Teclado del usuario para el menu
-     * - fds[1]: Pipe del banco para escuchar silenciosamente ordenes de bloqueo */
+     * - fds[0]: STDIN (socket TCP via dup2) para el menu
+     * - fds[1]: Pipe del banco para escuchar ordenes de bloqueo */
     struct pollfd fds[2];
-    fds[0].fd = STDIN_FILENO; fds[0].events = POLLIN; /* POLLIN = Despiertame si hay Datos para Leer */
+    fds[0].fd = STDIN_FILENO; fds[0].events = POLLIN;
     fds[1].fd = g_pipe_rd;    fds[1].events = POLLIN;
 
     mostrar_menu();
 
     while (1) {
-        /* Congelamos aqui hasta que ocurra uno de los 2 eventos:
-         * 1. El usuario pulsa una tecla.
-         * 2. El banco manda algo por la tuberia. */
         int ret = poll(fds, 2, -1);
         if (ret < 0) { if (errno==EINTR) continue; break; }
 
@@ -649,7 +843,7 @@ int main(int argc, char *argv[]) {
                 buf[n] = '\0';
                 printf("\n[ALERTA DEL BANCO]: %s\n", buf);
                 fflush(stdout);
-                if (strstr(buf, "BLOQUEO")) { /* <- Comprueba si el mensaje del Banco contiene la firma literal de baneo */
+                if (strstr(buf, "BLOQUEO")) {
                     mq_close(g_mq_monitor);
                     mq_close(g_mq_log);
                     close(g_pipe_rd);
@@ -659,11 +853,12 @@ int main(int argc, char *argv[]) {
         }
 
         if (fds[0].revents & POLLIN) {
+            char buf[64];
+            if (fgets(buf, sizeof(buf), stdin) == NULL) break; /* Cliente desconectado */
+            limpiar_telnet(buf);
             int opcion;
-            if (scanf("%d", &opcion) == 1) {
+            if (sscanf(buf, "%d", &opcion) == 1) {
                 procesar_opcion(opcion);
-            } else {
-                int c; while ((c=getchar())!='\n'&&c!=EOF);
             }
             mostrar_menu();
         }
