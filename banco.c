@@ -89,7 +89,7 @@ static int leer_config(const char *ruta, Config *cfg) {
   return 0;
 }
 /* Actualizar PROXIMO_ID en config.txt */
-static void guardar_proximo_id(int nuevo_id) {
+void guardar_proximo_id(int nuevo_id) {
   FILE *f = fopen("config.txt", "r");
   if (!f)
     return;
@@ -119,7 +119,7 @@ static void guardar_proximo_id(int nuevo_id) {
 static void escribir_log(const char *linea);
 
 /* Buscar cuenta usando fseek (Acceso Directo) */
-static int buscar_cuenta(int numero, Cuenta *c) {
+int buscar_cuenta(int numero, Cuenta *c) {
   if (numero < ID_INICIAL)
     return 0;
   long offset = (long)(numero - ID_INICIAL) * (long)sizeof(Cuenta);
@@ -144,7 +144,7 @@ static int buscar_cuenta(int numero, Cuenta *c) {
 }
 
 /* Crear nueva cuenta */
-static int crear_cuenta(Cuenta *nueva) {
+int crear_cuenta(Cuenta *nueva) {
   /* 1. Obtener y reservar el próximo ID bajo SEM_CONFIG */
   sem_t *sc = sem_open(SEM_CONFIG, 0);
   if (sc == SEM_FAILED) {
@@ -321,8 +321,7 @@ static pid_t lanzar_usuario(int conn_fd, int *pipe_wr_out) {
     close(pfd[1]);        /* Cierra extremo escritura del pipe (solo lee) */
     close(g_server_fd);   /* El hijo NO necesita el socket de escucha */
 
-    /* ★ dup2(): LA MAGIA DE LA FASE II ★
-     * Redirige STDIN y STDOUT al socket de red (conn_fd).
+    /* Redirige STDIN y STDOUT al socket de red (conn_fd).
      * Despues de esto, cualquier printf() del proceso hijo
      * sale por el cable TCP hacia el cliente Telnet,
      * y cualquier scanf()/fgets() lee lo que el usuario teclea.
@@ -461,7 +460,7 @@ int main(void) {
   printf("[BANCO] Esperando conexiones Telnet...\n");
 
   /* ═══════════════════════════════════════════════════════════
-   * Fase II: poll() sobre socket servidor (reemplaza STDIN)
+   * poll() sobre socket servidor (reemplaza STDIN)
    * pfds[0] = socket servidor: detecta conexiones entrantes
    * pfds[1] = MQ_LOG:  mensajes de log de los hijos
    * pfds[2] = MQ_ALERTA: alertas del monitor

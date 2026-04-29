@@ -1,5 +1,0 @@
-[2026-04-28 18:49:12] DEPOSITO cuenta=1001 monto=5000.00 divisa=EUR estado=OK pid=70
-[2026-04-28 18:49:13] RETIRO cuenta=1001 monto=100.00 divisa=EUR estado=OK pid=70
-[2026-04-28 18:49:14] RETIRO cuenta=1001 monto=100.00 divisa=EUR estado=OK pid=70
-[2026-04-28 18:49:15] RETIRO cuenta=1001 monto=100.00 divisa=EUR estado=OK pid=70
-[2026-04-28 18:49:15] ALERTA: RETIROS_EXCESIVOS - cuenta BLOQUEADA

@@ -1,87 +1,81 @@
-# Guía de Uso — SecureBank Fase II (Servidor TCP)
+# Guía Práctica — SecureBank: Cómo usar la Fase 2
 
-Esta guía explica cómo compilar, ejecutar y utilizar las nuevas funcionalidades implementadas en la **Fase II**. El sistema ahora funciona como un servidor TCP distribuido.
+Dado que estás en un Mac y el puerto `5000` suele estar bloqueado por el sistema operativo (AirPlay Receiver), la forma más sencilla de probar el banco sin problemas de conexión ni necesidad de instalar nada en tu Mac es **hacerlo todo dentro de Docker**. 
 
-## 1. Preparación y Compilación
+He modificado el `Dockerfile` para que incluya `telnet`, de forma que podamos usar varios clientes directamente dentro del entorno Linux virtual.
 
-### Requisitos
-*   Sistema operativo Linux (o Docker en Windows/Mac).
-*   Compilador `gcc`, `make`.
-*   Librería POSIX RealTime (`-lrt`).
+Sigue estos pasos en orden, abriendo **varias terminales** en tu Mac.
 
-### Compilación
-Usa el Makefile incluido para limpiar y compilar todos los componentes:
+---
+
+## TERMINAL 1: Iniciar el Servidor del Banco
+
+Esta terminal actuará como el ordenador principal del banco.
+
+**Paso 1: Construir la imagen del contenedor (solo hace falta una vez)**
+En la carpeta del proyecto, ejecuta:
+```bash
+docker build -t securebank .
+```
+
+**Paso 2: Levantar el contenedor y entrar en él**
+Para evitar conflictos de puertos en tu Mac, iniciaremos el contenedor asignándole un nombre específico (`servidor_banco`) sin mapear puertos hacia fuera:
+```bash
+docker run --name servidor_banco -it --rm -v "$(pwd):/securebank" securebank
+```
+*(Ahora estarás dentro del Linux virtual, verás un prompt parecido a `root@xxxxx:/securebank#`)*
+
+**Paso 3: Compilar e inicializar datos**
+Dentro del contenedor, compila el código C y crea la base de datos de prueba:
 ```bash
 make clean && make
+./init_cuentas
 ```
-Esto generará los ejecutables: `banco`, `usuario`, `monitor` e `init_cuentas`.
+
+**Paso 4: Arrancar el Banco**
+Inicia el servidor principal.
+```bash
+./banco
+```
+Verás un mensaje diciendo que está escuchando en el puerto `5000`. ¡Déjalo ejecutándose!
 
 ---
 
-## 2. Ejecución con Docker (Recomendado)
+## TERMINAL 2: Conectar el primer Cliente Remoto
 
-Debido a que el puerto 5000 suele estar ocupado en macOS (por AirPlay Receiver), se recomienda usar Docker para aislar el entorno.
+Abre una **segunda ventana/pestaña de terminal** en tu Mac. Esta simulará ser un cajero automático o un usuario en su casa.
 
-1.  **Construir la imagen**:
-    ```bash
-    docker build -t securebank .
-    ```
-2.  **Lanzar el contenedor** (sin mapear puerto 5000 al host para evitar conflictos):
-    ```bash
-    docker run -it --rm -v "$(pwd):/securebank" securebank
-    ```
-3.  **Dentro del contenedor**, inicializa y lanza el banco:
-    ```bash
-    ./init_cuentas
-    ./banco
-    ```
+**Paso 5: Entrar en el mismo contenedor**
+Como el banco ya está corriendo en el contenedor `servidor_banco`, vamos a "infiltrarnos" en ese mismo contenedor abriendo una nueva sesión de bash:
+```bash
+docker exec -it servidor_banco bash
+```
+*(De nuevo, estarás dentro de Linux: `root@xxxxx:/securebank#`)*
 
----
-
-## 3. Uso del Cliente (Telnet)
-
-Una vez que el servidor `./banco` esté corriendo, puedes conectar clientes desde otras terminales (dentro del mismo contenedor o red).
-
-### Conexión
+**Paso 6: Conectarse usando Telnet**
+Como he añadido `telnet` al contenedor, no necesitas instalarlo en tu Mac. Ejecuta:
 ```bash
 telnet 127.0.0.1 5000
 ```
-
-### Flujo de Autenticación
-Al conectar, el sistema te pedirá tu número de cuenta:
-*   **Login**: Introduce un ID existente (ej: `1001`).
-*   **Crear cuenta**: Introduce `0`. El sistema te pedirá el nombre del titular y te asignará un nuevo ID automáticamente.
-*   **Salir**: Introduce `-1`.
-
-### Operaciones
-El menú es idéntico al de la Fase I, pero ahora es **asíncrono**. Puedes realizar depósitos, retiros y transferencias. El servidor no se bloquea mientras esperas hilos de ejecución.
+Verás el menú de bienvenida de SecureBank pidiéndote el número de cuenta.
+*   **Para entrar con una cuenta existente**: Escribe `1001`, `1002`, `1003`, etc.
+*   **Para crear una cuenta nueva remota**: Escribe `0`. Te pedirá tu nombre y te generará una cuenta nueva automáticamente.
 
 ---
 
-## 4. Pruebas de Seguridad y Robustez
+## TERMINAL 3: Probar la Concurrencia (Opcional)
 
-### Validación de Fraude (Bloqueo)
-Para verificar que el sistema de seguridad (Fix #2) funciona:
-1.  Conecta un cliente vía Telnet.
-2.  Realiza 3 retiros rápidos consecutivos.
-3.  El **Monitor** detectará la anomalía.
-4.  El **Banco** enviará una orden de `BLOQUEO` por el pipe exclusivo de ese proceso.
-5.  El cliente recibirá el mensaje de alerta y su conexión TCP se cerrará automáticamente.
+Si quieres ver cómo el servidor TCP maneja a varias personas a la vez (el objetivo principal de esta Fase 2), abre una **tercera ventana de terminal** en tu Mac y repite exactamente los mismos pasos de la Terminal 2:
 
-### Verificación de Zombis (Fix #1)
-Mientras el servidor corre, puedes verificar que no se acumulan procesos finalizados:
-```bash
-ps aux | grep usuario
-```
-Si el Cosechador de Zombis funciona, solo verás los procesos `usuario` que tengan una conexión Telnet activa.
+1. `docker exec -it servidor_banco bash`
+2. `telnet 127.0.0.1 5000`
+3. Inicia sesión con otra cuenta (ej: `1002`).
+
+Podrás hacer depósitos y transferencias en ambas terminales de forma simultánea. ¡El banco ya no se bloquea!
 
 ---
 
-## 5. Suite de Tests Automatizada
+## 🛠️ Cómo detener todo y salir
 
-Se ha incluido un script para validar toda la Fase II de un solo golpe:
-```bash
-chmod +x test_fase2.sh
-./test_fase2.sh
-```
-El script verifica compilación, concurrencia, protocolos de red, detección de fraude y limpieza de recursos.
+1. En los **clientes** (Terminal 2 y 3): Simplemente escoge la opción `6. Salir` en el menú del banco. Esto cerrará la conexión Telnet. Para salir de Linux escribe `exit`.
+2. En el **servidor** (Terminal 1): Pulsa `Ctrl + C` para detener el banco de forma segura. Todos los procesos hijos y semáforos se limpiarán. Para salir de Linux escribe `exit` y el contenedor se destruirá automáticamente dejándolo todo limpio.

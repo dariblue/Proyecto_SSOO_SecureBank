@@ -1,27 +1,22 @@
 FROM gcc:latest
 
-# Instalar herramientas de depuración
+# Instalar herramientas de depuración y cliente telnet
 RUN apt-get update && apt-get install -y \
     make \
     gdb \
     strace \
+    telnet \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /securebank
 
-# Exponer puerto TCP para Telnet (Fase II)
+# Exponer puerto TCP para Telnet (Parte 2)
 EXPOSE 5000
 
 # El código fuente se monta como volumen
-# Uso:
-#   docker build -t securebank .
-#   docker run -it --rm -p 5000:5000 -v "$(pwd):/securebank" securebank
-#
-# Dentro del contenedor:
-#   make clean && make
-#   ./init_cuentas
-#   ./banco                    # Servidor
-#   --- desde otra terminal ---
-#   telnet 127.0.0.1 5000      # Cliente
+# Uso recomendado:
+# 1. Construir: docker build -t securebank .
+# 2. Iniciar: docker run --name servidor_banco -it --rm -v "$(pwd):/securebank" securebank
+# 3. Otra terminal: docker exec -it servidor_banco bash
 
 CMD ["/bin/bash"]
