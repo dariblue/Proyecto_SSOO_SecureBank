@@ -475,11 +475,12 @@ int main(void) {
 
   while (!g_salir) {
 
-    /* ══ Cosechador de Zombis (Zombie Harvester) ══
-     * Limpia automaticamente cualquier hijo que haya terminado su
-     * sesion Telnet. Sin esto, los procesos finalizados quedarian
-     * como zombis (defunct) consumiendo entradas en la tabla de
-     * procesos del kernel. */
+    /* ═══════════════════════════════════════════════════════════
+     * ═══════ Buscador de Zombis ═══════════════════════════════
+     * Limpia cualquier hijo que haya terminado su sesion Telnet. 
+     * Sin esto, los procesos finalizados quedarian como zombis 
+     * (defunct) consumiendo entradas en la tabla de procesos del kernel. 
+     * ═══════════════════════════════════════════════════════════ */ 
     {
       int wst;
       pid_t wpid;
@@ -497,7 +498,7 @@ int main(void) {
       }
     }
 
-    int ret = poll(pfds, 3, 500); /* Timeout 500ms: permite cosechar zombis periodicamente */
+    int ret = poll(pfds, 3, 500); /* Timeout 500ms: permite buscar zombis periodicamente */
     if (ret < 0) {
       if (errno == EINTR)
         continue;
